@@ -1,20 +1,20 @@
-name: JMeter Consumer Workflow
+name: JMeter Consumer Workflow  # Name of the GitHub Actions workflow
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # Trigger workflow manually from GitHub UI
     inputs:
       action:
-        description: "Choose action"
+        description: "Choose action"  # Input description shown in UI
         required: true
         default: run-tests
         type: choice
-        options: [run-tests, cleanup]
+        options: [run-tests, cleanup]  # Two options: run tests or clean old runs
       run_id:
         description: "Optional Run ID (leave blank for auto yyyymmdd-HHMMSS)"
         required: false
         default: ""
       environment:
-        description: "Environment"
+        description: "Environment"  # Choose which environment properties to use
         required: true
         default: dev
         type: choice
@@ -32,73 +32,100 @@ on:
         required: true
         default: "7"
 
-permissions:
-  contents: write
-  actions: write
+permissions:  # Define permissions for this workflow
+  contents: write  # Allows modifying repo contents
+  actions: write   # Allows deleting workflow runs
 
 jobs:
-  prepare:
+  prepare:  # Job to generate a unique Run ID
     runs-on: ubuntu-latest
     outputs:
-      RUN_ID: ${{ steps.setid.outputs.RUN_ID }}
+      RUN_ID: ${{ steps.setid.outputs.RUN_ID }}  # Export Run ID for other jobs
     steps:
       - name: Generate runID
         id: setid
         run: |
+          # If user provides run_id, use it; otherwise generate timestamp
           if [ -z "${{ github.event.inputs.run_id }}" ]; then
             runid=$(date +%Y%m%d-%H%M%S)
           else
             runid="${{ github.event.inputs.run_id }}"
           fi
-          echo "RUN_ID=$runid" >> $GITHUB_OUTPUT
+          echo "RUN_ID=$runid" >> $GITHUB_OUTPUT  # Set as workflow output
 
   run-tests:
-    if: ${{ github.event.inputs.action == 'run-tests' }}
-    needs: prepare
+    if: ${{ github.event.inputs.action == 'run-tests' }}  # Only run if action is 'run-tests'
+    needs: prepare  # Depends on 'prepare' job
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4  # Checkout repository code
 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
-          java-version: "17"
+          distribution: temurin  # Java distribution to install
+          java-version: "17"     # Java version
 
       - name: Install JMeter
         run: |
+          set -e  # Stop workflow immediately if any command fails
           JMETER_VERSION=5.6.3
+          # Download JMeter tarball
           curl -L https://downloads.apache.org/jmeter/binaries/apache-jmeter-$JMETER_VERSION.tgz -o jmeter.tgz
+          # Extract JMeter
           tar -xzf jmeter.tgz
           mv apache-jmeter-$JMETER_VERSION $HOME/jmeter
+          # Add JMeter bin to PATH
           echo "$HOME/jmeter/bin" >> $GITHUB_PATH
 
       - name: Prepare results folder
-        run: mkdir -p results
+        run: mkdir -p results  # Create folder for JMeter outputs
 
       - name: Download previous run data (optional)
-        if: ${{ github.event.inputs.previous_run_id != '' }}
+        if: ${{ github.event.inputs.previous_run_id != '' }}  # Only run if previous_run_id provided
         uses: actions/download-artifact@v4
         with:
           name: consumer-data-${{ github.event.inputs.previous_run_id }}
-          path: data/
+          path: data/  # Save previous run data to 'data' folder
 
       - name: Run selected JMeter scripts
         run: |
+          set -e  # Fail immediately if any command fails
+
+          # Split comma-separated script names into array
           scripts="${{ github.event.inputs.scripts }}"
           IFS=',' read -ra script_arr <<< "$scripts"
-          for script in "${script_arr[@]}"; do
-            echo "Running JMeter script: $script.jmx"
-            jmeter -n -t tests/$script.jmx \
-                   -l results/${{ needs.prepare.outputs.RUN_ID }}-$script.jtl \
-                   -q env/${{ github.event.inputs.environment }}.properties
 
+          # Determine environment properties file
+          env_file="env/${{ github.event.inputs.environment }}.properties"
+          if [ ! -f "$env_file" ]; then  # Check if file exists
+            echo "ERROR: Environment properties file not found: $env_file"
+            exit 1
+          fi
+          echo "Using environment properties file: $env_file"
+
+          # Loop over each script
+          for script in "${script_arr[@]}"; do
+            jmx_file="tests/$script.jmx"
+            if [ ! -f "$jmx_file" ]; then  # Check if script file exists
+              echo "ERROR: JMeter script not found: $jmx_file"
+              exit 1
+            fi
+
+            echo "Running JMeter script: $jmx_file"
+            # Run JMeter non-GUI mode, generate JTL results
+            jmeter -n -t "$jmx_file" \
+                   -l results/${{ needs.prepare.outputs.RUN_ID }}-$script.jtl \
+                   -q "$env_file"
+
+            echo "Generating HTML report for $script"
             # Convert JTL to HTML report
             jmeter -g results/${{ needs.prepare.outputs.RUN_ID }}-$script.jtl \
                    -o results/${{ needs.prepare.outputs.RUN_ID }}-$script-report
           done
 
       - name: Upload all JMeter results
+        if: always()  # Upload even if previous steps failed or workflow canceled
         uses: actions/upload-artifact@v4
         with:
           name: jmeter-results-${{ needs.prepare.outputs.RUN_ID }}
@@ -106,27 +133,29 @@ jobs:
           retention-days: ${{ github.event.inputs.retention_days }}
 
       - name: Upload consumer data if generated
+        if: always()  # Upload even if workflow failed
         run: |
           for f in results/*consumers*.csv; do
-            if [ -f "$f" ]; then
+            if [ -f "$f" ]; then  # Only upload if file exists
               echo "Uploading $f"
               gh upload-artifact --name consumer-data-${{ needs.prepare.outputs.RUN_ID }} --path "$f"
             fi
           done
 
   cleanup:
-    if: ${{ github.event.inputs.action == 'cleanup' }}
+    if: ${{ github.event.inputs.action == 'cleanup' }}  # Only run if action is 'cleanup'
     runs-on: ubuntu-latest
     steps:
       - name: Delete workflow runs older than retention period
         uses: actions/github-script@v7
         with:
           script: |
-            const days = parseInt('${{ github.event.inputs.retention_days }}', 10);
-            const cutoff = new Date(Date.now() - days*24*60*60*1000);
+            const days = parseInt('${{ github.event.inputs.retention_days }}', 10);  // Retention in days
+            const cutoff = new Date(Date.now() - days*24*60*60*1000);  // Calculate cutoff date
             const owner = context.repo.owner;
             const repo = context.repo.repo;
 
+            // Get all workflow runs
             const runs = await github.paginate(
               github.rest.actions.listWorkflowRunsForRepo,
               { owner, repo, per_page: 100 }
@@ -135,9 +164,9 @@ jobs:
             let deleted = 0;
             for (const run of runs) {
               const created = new Date(run.created_at);
-              if (created < cutoff) {
+              if (created < cutoff) {  // Delete runs older than retention
                 await github.rest.actions.deleteWorkflowRun({ owner, repo, run_id: run.id });
                 deleted++;
               }
             }
-            core.info(`Deleted ${deleted} workflow runs older than ${days} days`);
+            core.info(`Deleted ${deleted} workflow runs older than ${days} days`)
