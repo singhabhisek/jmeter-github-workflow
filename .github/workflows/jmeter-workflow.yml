@@ -1,129 +1,138 @@
 name: JMeter Consumer Workflow  # Name of the workflow
 
-# Trigger this workflow manually through GitHub UI
+# Trigger the workflow manually with inputs
 on:
   workflow_dispatch:
     inputs:
-      action:  # Select the action to perform
+      action:  # Choose whether to run tests or cleanup old runs
         description: "Choose action"
         required: true
         default: run-tests
         type: choice
-        options: [run-tests, cleanup]  # run-tests or cleanup old runs
-      run_id:  # Optional Run ID for this execution
+        options: [run-tests, cleanup]
+      run_id:  # Optional run ID, defaults to timestamp if blank
         description: "Optional Run ID (leave blank for auto yyyymmdd-HHMMSS)"
         required: false
         default: ""
-      environment:  # Target environment for the tests
+      environment:  # Target environment for tests
         description: "Environment"
         required: true
         default: dev
         type: choice
         options: [dev, staging, prod]
-      scripts:  # Which JMeter scripts to run (comma-separated)
+      scripts:  # Comma-separated list of JMX scripts
         description: "Comma-separated JMX scripts to run (default: all)"
         required: false
         default: "create-consumer,get-consumer,get-product,post-product,home-page"
-      previous_run_id:  # Optional ID for dependent data from a previous run
+      previous_run_id:  # Optional ID for dependent data like consumers
         description: "Optional: specify runID for dependent data (like consumers)"
         required: false
         default: ""
-      retention_days:  # How long to keep artifacts and old runs
+      vm_count:  # Number of VMs to run in parallel
+        description: "Number of VM instances to run in parallel"
+        required: true
+        default: 1
+      retention_days:  # Days to retain artifacts/workflow runs
         description: "Retention period (days) for old runs/artifacts"
         required: true
         default: "7"
-      vm_count:  # Number of parallel VMs/instances for load
-        description: "Number of instances to run (1 for single, 2+ for parallel)"
-        required: true
-        default: "1"
 
-# Workflow permissions
+# Permissions required for the workflow
 permissions:
-  contents: write  # Needed for artifacts
-  actions: write   # Needed for deleting old runs
+  contents: write
+  actions: write
 
-# Step 1: Prepare RUN_ID for this execution
+# Prepare job: generate RUN_ID before running tests
 jobs:
   prepare:
-    runs-on: ubuntu-latest  # Use Ubuntu VM for preparation steps
+    runs-on: ubuntu-latest  # VM type for preparation
     outputs:
-      RUN_ID: ${{ steps.setid.outputs.RUN_ID }}  # Output RUN_ID to share with other jobs
+      RUN_ID: ${{ steps.setid.outputs.RUN_ID }}  # Pass generated RUN_ID to other jobs
     steps:
       - name: Generate runID
         id: setid
         run: |
-          # If user did not provide run_id, generate one using current datetime
+          # If user did not provide run_id, generate timestamp
           if [ -z "${{ github.event.inputs.run_id }}" ]; then
             runid=$(date +%Y%m%d-%H%M%S)
           else
             runid="${{ github.event.inputs.run_id }}"
           fi
-          # Set RUN_ID as output for downstream jobs
+          # Export RUN_ID to be used in other jobs
           echo "RUN_ID=$runid" >> $GITHUB_OUTPUT
 
-# Step 2a: Single instance run if vm_count = 1
-  run-single:
-    if: ${{ github.event.inputs.action == 'run-tests' && github.event.inputs.vm_count == '1' }}
-    needs: prepare  # Wait for RUN_ID generation
-    runs-on: ubuntu-latest  # Execute tests on Ubuntu VM
+# Run tests job
+  run-tests:
+    if: ${{ github.event.inputs.action == 'run-tests' }}  # Only run if action is run-tests
+    needs: prepare  # Depends on prepare job
+    runs-on: ubuntu-latest  # Base VM
+    strategy:
+      # Determine matrix based on VM count
+      matrix:
+        # Use array of instances if VM count > 1, else single instance
+        instance: ${{ github.event.inputs.vm_count && github.event.inputs.vm_count > 1 && fromJSON('["1","2"]') || ['1'] }}
+      fail-fast: false  # Do not cancel other matrix jobs if one fails
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4  # Pull repository code
+      - uses: actions/checkout@v4  # Checkout repo
 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          distribution: temurin  # Use Eclipse Temurin JDK
-          java-version: "17"     # Java version 17
+          distribution: temurin
+          java-version: "17"  # Required Java version for JMeter
 
       - name: Install JMeter
         run: |
-          JMETER_VERSION=5.6.3  # Specify JMeter version
-          # Download JMeter tarball
+          JMETER_VERSION=5.6.3
+          # Download JMeter binaries
           curl -L https://downloads.apache.org/jmeter/binaries/apache-jmeter-$JMETER_VERSION.tgz -o jmeter.tgz
-          # Extract JMeter
+          # Extract binaries
           tar -xzf jmeter.tgz
           mv apache-jmeter-$JMETER_VERSION $HOME/jmeter
           # Add JMeter bin folder to PATH
           echo "$HOME/jmeter/bin" >> $GITHUB_PATH
 
       - name: Prepare results folder
-        run: mkdir -p results  # Create folder for results
+        run: mkdir -p results  # Create folder to store JTL/HTML reports
 
       - name: Download previous run data (optional)
-        if: ${{ github.event.inputs.previous_run_id != '' }}  # Only if previous_run_id is provided
+        if: ${{ github.event.inputs.previous_run_id != '' }}  # Only if previous run ID provided
         uses: actions/download-artifact@v4
         with:
-          name: consumer-data-${{ github.event.inputs.previous_run_id }}  # Artifact name
-          path: data/  # Download location
+          name: consumer-data-${{ github.event.inputs.previous_run_id }}
+          path: data/  # Save previous data in local folder
 
       - name: Run selected JMeter scripts
+        continue-on-error: false  # Stop job if any script fails
         run: |
-          scripts="${{ github.event.inputs.scripts }}"  # Get comma-separated scripts
-          IFS=',' read -ra script_arr <<< "$scripts"  # Split into array
+          # Split comma-separated scripts into array
+          scripts="${{ github.event.inputs.scripts }}"
+          IFS=',' read -ra script_arr <<< "$scripts"
+          # Loop over each script
           for script in "${script_arr[@]}"; do
-            echo "Running JMeter script: $script.jmx"
-            # Run JMeter in non-GUI mode
+            echo "Running JMeter script: $script.jmx on instance ${{ matrix.instance }}"
+            # Execute JMeter in non-GUI mode
             jmeter -n -t tests/$script.jmx \
-                   -l results/${{ needs.prepare.outputs.RUN_ID }}-$script.jtl \
+                   -l results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.jtl \
                    -q env/${{ github.event.inputs.environment }}.properties
 
-            # Convert JTL results to HTML report
-            jmeter -g results/${{ needs.prepare.outputs.RUN_ID }}-$script.jtl \
-                   -o results/${{ needs.prepare.outputs.RUN_ID }}-$script-report
+            # Generate HTML report from JTL
+            jmeter -g results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.jtl \
+                   -o results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}-report
           done
 
       - name: Upload all JMeter results
-        if: ${{ always() }}  # Upload even if workflow is cancelled
+        if: always()  # Upload artifacts even if job failed/cancelled
         uses: actions/upload-artifact@v4
         with:
-          name: jmeter-results-${{ needs.prepare.outputs.RUN_ID }}
-          path: results/  # Upload all files in results folder
+          name: jmeter-results-${{ needs.prepare.outputs.RUN_ID }}-instance${{ matrix.instance }}
+          path: results/  # Folder to upload
           retention-days: ${{ github.event.inputs.retention_days }}
 
       - name: Upload consumer data if generated
-        if: ${{ always() }}  # Upload even if cancelled
+        if: always()  # Always attempt to upload
         run: |
+          # Loop over CSVs matching consumers
           for f in results/*consumers*.csv; do
             if [ -f "$f" ]; then
               echo "Uploading $f"
@@ -131,95 +140,28 @@ jobs:
             fi
           done
 
-# Step 2b: Multi-instance run using matrix if vm_count > 1
-  run-matrix:
-    if: ${{ github.event.inputs.action == 'run-tests' && github.event.inputs.vm_count != '1' }}
-    needs: prepare
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        # Create matrix instances 1..vm_count
-        instance: ${{ fromJSON('[' + join(range(1, github.event.inputs.vm_count | int + 1), ',') + ']') }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Install JMeter
-        run: |
-          JMETER_VERSION=5.6.3
-          curl -L https://downloads.apache.org/jmeter/binaries/apache-jmeter-$JMETER_VERSION.tgz -o jmeter.tgz
-          tar -xzf jmeter.tgz
-          mv apache-jmeter-$JMETER_VERSION $HOME/jmeter
-          echo "$HOME/jmeter/bin" >> $GITHUB_PATH
-
-      - name: Prepare results folder
-        run: mkdir -p results
-
-      - name: Download previous run data (optional)
-        if: ${{ github.event.inputs.previous_run_id != '' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: consumer-data-${{ github.event.inputs.previous_run_id }}
-          path: data/
-
-      - name: Run selected JMeter scripts
-        run: |
-          scripts="${{ github.event.inputs.scripts }}"
-          IFS=',' read -ra script_arr <<< "$scripts"
-          for script in "${script_arr[@]}"; do
-            echo "Running JMeter script: $script.jmx on instance ${{ matrix.instance }}"
-            jmeter -n -t tests/$script.jmx \
-                   -l results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.jtl \
-                   -q env/${{ github.event.inputs.environment }}.properties
-
-            jmeter -g results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.jtl \
-                   -o results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}-report
-          done
-
-      - name: Upload all JMeter results
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: jmeter-results-${{ needs.prepare.outputs.RUN_ID }}-instance${{ matrix.instance }}
-          path: results/
-          retention-days: ${{ github.event.inputs.retention_days }}
-
-      - name: Upload consumer data if generated
-        if: ${{ always() }}
-        run: |
-          for f in results/*consumers*.csv; do
-            if [ -f "$f" ]; then
-              echo "Uploading $f"
-              gh upload-artifact --name consumer-data-${{ needs.prepare.outputs.RUN_ID }}-instance${{ matrix.instance }} --path "$f"
-            fi
-          done
-
-# Step 3: Cleanup old workflow runs
+# Cleanup job
   cleanup:
-    if: ${{ github.event.inputs.action == 'cleanup' }}
+    if: ${{ github.event.inputs.action == 'cleanup' }}  # Only run if cleanup chosen
     runs-on: ubuntu-latest
     steps:
       - name: Delete workflow runs older than retention period
         uses: actions/github-script@v7
         with:
           script: |
-            const days = parseInt('${{ github.event.inputs.retention_days }}', 10);  // Retention days
-            const cutoff = new Date(Date.now() - days*24*60*60*1000);  // Calculate cutoff date
+            const days = parseInt('${{ github.event.inputs.retention_days }}', 10);
+            const cutoff = new Date(Date.now() - days*24*60*60*1000);
             const owner = context.repo.owner;
             const repo = context.repo.repo;
 
+            // List all workflow runs
             const runs = await github.paginate(
               github.rest.actions.listWorkflowRunsForRepo,
               { owner, repo, per_page: 100 }
             );
 
             let deleted = 0;
+            // Delete runs older than cutoff
             for (const run of runs) {
               const created = new Date(run.created_at);
               if (created < cutoff) {
