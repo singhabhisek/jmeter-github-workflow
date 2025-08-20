@@ -145,12 +145,12 @@ jobs:
           # Dummy Sampler Plugin (download ZIP and extract JARs)
           curl -L -o /tmp/jpgc-dummy-0.4.zip $DUMMY_PLUGIN_URL
           unzip -o /tmp/jpgc-dummy-0.4.zip -d /tmp/dummy-plugin
-          cp /tmp/dummy-plugin/*.jar $HOME/jmeter/lib/ext/
+          find /tmp/dummy-plugin -name "*.jar" -exec cp {} $HOME/jmeter/lib/ext/ \;
           
           # Ultimate Thread Group Plugin (download ZIP and extract JARs)
           curl -L -o /tmp/jpgc-ultimate-thread-group-3.0.zip $ULTIMATE_PLUGIN_URL
           unzip -o /tmp/jpgc-ultimate-thread-group-3.0.zip -d /tmp/ultimate-plugin
-          cp /tmp/ultimate-plugin/*.jar $HOME/jmeter/lib/ext/
+          find /tmp/ultimate-plugin -name "*.jar" -exec cp {} $HOME/jmeter/lib/ext/ \;
 
           echo "✅ Plugins installed"
 
