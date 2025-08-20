@@ -1,44 +1,62 @@
-name: JMeter Consumer Workflow  # Workflow name
+name: JMeter Consumer Workflow
 
 # Trigger workflow manually with inputs
 on:
   workflow_dispatch:
     inputs:
-      action:  # Run tests or cleanup
-        description: "Choose action"
+      # Dropdown to select the type of test: load, stress, or endurance
+      test_type:
+        description: "Select type of test"
         required: true
-        default: run-tests
+        default: load
         type: choice
-        options: [run-tests, cleanup]
-      run_id:  # Optional run ID; default: timestamp
-        description: "Optional Run ID (leave blank for auto yyyymmdd-HHMMSS)"
-        required: false
-        default: ""
-      environment:  # Target environment for tests
-        description: "Environment"
-        required: true
-        default: dev
-        type: choice
-        options: [dev, staging, prod]
-      scripts:  # Comma-separated JMX scripts
+        options:
+          - load
+          - stress
+          - endurance
+
+      # Comma-separated JMX scripts to run; default runs all
+      scripts:
         description: "Comma-separated JMX scripts to run (default: all)"
         required: false
         default: "create-consumer,get-consumer,get-product,post-product,home-page"
-      vm_count:  # Number of VMs to run in parallel
+
+      # Optional run ID; if blank, timestamp will be used
+      run_id:
+        description: "Optional Run ID (leave blank for auto yyyymmdd-HHMMSS)"
+        required: false
+        default: ""
+
+      # Environment to use for properties
+      environment:
+        description: "Target environment for tests"
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+      # Number of VMs to run in parallel
+      vm_count:
         description: "Number of VM instances to run in parallel"
         required: true
         default: 1
-      retention_days:  # Retention period for artifacts/runs
+
+      # Retention period for old runs/artifacts
+      retention_days:
         description: "Retention period (days) for old runs/artifacts"
         required: true
-        default: "7"
+        default: 7
 
 permissions:
   contents: write
   actions: write
 
-# Job: prepare run ID and matrix for VMs
 jobs:
+
+  # --- Job to prepare run ID and VM matrix ---
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -48,7 +66,7 @@ jobs:
       - name: Generate runID
         id: setid
         run: |
-          # Use user-provided run_id or generate timestamp
+          # If user provides run_id, use it; otherwise, generate timestamp
           if [ -z "${{ github.event.inputs.run_id }}" ]; then
             runid=$(date +%Y%m%d-%H%M%S)
           else
@@ -59,30 +77,34 @@ jobs:
       - name: Generate VM matrix
         id: setmatrix
         run: |
+          # Generate a JSON array ["1","2",...] based on vm_count
           COUNT=${{ github.event.inputs.vm_count }}
           if [ -z "$COUNT" ]; then COUNT=1; fi
           MATRIX=$(seq -s, 1 $COUNT | sed 's/,/","/g')
           MATRIX="[\"$MATRIX\"]"
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
 
-# Job: run JMeter tests
+  # --- Job to run JMeter tests ---
   run-tests:
-    if: ${{ github.event.inputs.action == 'run-tests' }}
+    if: ${{ github.event.inputs.action != 'cleanup' }}  # Only run tests
     needs: prepare
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        instance: ${{ fromJSON(needs.prepare.outputs.MATRIX_INSTANCES) }}
+        instance: ${{ fromJSON(needs.prepare.outputs.MATRIX_INSTANCES) }}  # VM instances
       fail-fast: false
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
+      # Setup Java environment required by JMeter
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
+      # Install Apache JMeter dynamically
       - name: Install JMeter
         run: |
           JMETER_VERSION=5.6.3
@@ -91,85 +113,71 @@ jobs:
           mv apache-jmeter-$JMETER_VERSION $HOME/jmeter
           echo "$HOME/jmeter/bin" >> $GITHUB_PATH
 
-      - name: Prepare results folder
-        run: mkdir -p results  # Store all JTL, logs, HTML reports here
-
-      # --- Validate that each script exists and its data folder is not empty ---
-      - name: Validate scripts and data
+      # --- Validate folder structure and script existence ---
+      - name: Validate test folder and scripts
         run: |
-          scripts="${{ github.event.inputs.scripts }}"
-          IFS=',' read -ra script_arr <<< "$scripts"
-          for script in "${script_arr[@]}"; do
-            # Check JMX script exists
-            JMX_PATH="tests/load/$script.jmx"  # <-- assumes structure: tests/<test_type>/<script>.jmx
+          # Get user-selected test type and scripts
+          TEST_TYPE="${{ github.event.inputs.test_type }}"
+          SCRIPTS="${{ github.event.inputs.scripts }}"
+          TEST_FOLDER="tests/$TEST_TYPE"
+
+          # Check folder exists and is not empty
+          if [ ! -d "$TEST_FOLDER" ]; then
+            echo "Error: Test folder $TEST_FOLDER does not exist!"
+            exit 1
+          fi
+          if [ -z "$(ls -A $TEST_FOLDER)" ]; then
+            echo "Error: Test folder $TEST_FOLDER is empty!"
+            exit 1
+          fi
+          echo "✅ Test folder $TEST_FOLDER exists and has files."
+
+          # Check each JMX script exists in folder
+          IFS=',' read -ra SCRIPT_ARR <<< "$SCRIPTS"
+          for script in "${SCRIPT_ARR[@]}"; do
+            JMX_PATH="$TEST_FOLDER/$script.jmx"
+            DATA_FOLDER="$TEST_FOLDER/data/$script"  # Each script can have its own data
             if [ ! -f "$JMX_PATH" ]; then
-              echo "Error: JMX script $JMX_PATH does not exist!"
+              echo "Error: Script file $JMX_PATH does not exist!"
               exit 1
             fi
-
-            # Check if data folder exists and has files
-            DATA_FOLDER="tests/load/data/$script"  # <-- assumes structure: tests/<test_type>/data/<script>/
             if [ ! -d "$DATA_FOLDER" ] || [ -z "$(ls -A $DATA_FOLDER)" ]; then
               echo "Error: Data folder $DATA_FOLDER missing or empty!"
               exit 1
             fi
           done
 
+      # Prepare folder to store results
+      - name: Prepare results folder
+        run: mkdir -p results
+
+      # Run the scripts
       - name: Run selected JMeter scripts
-        continue-on-error: false
         run: |
-          scripts="${{ github.event.inputs.scripts }}"
-          IFS=',' read -ra script_arr <<< "$scripts"
-          for script in "${script_arr[@]}"; do
-            echo "Running JMeter script: $script.jmx on instance ${{ matrix.instance }}"
-            
-            jmeter -n -t tests/load/$script.jmx \
+          IFS=',' read -ra SCRIPT_ARR <<< "${{ github.event.inputs.scripts }}"
+          for script in "${SCRIPT_ARR[@]}"; do
+            echo "Running $script.jmx on instance ${{ matrix.instance }}"
+
+            # Run JMeter in non-GUI mode and log results
+            jmeter -n -t tests/${{ github.event.inputs.test_type }}/$script.jmx \
                    -l results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.jtl \
                    -j results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.log \
                    -q env/${{ github.event.inputs.environment }}.properties
 
-            # Generate HTML report
+            # Generate HTML report for the run
             jmeter -g results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.jtl \
                    -o results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}-report
 
-            echo "------ JMeter log for $script instance ${{ matrix.instance }} ------"
+            # Stream JMeter log to console
+            echo "------ Log for $script instance ${{ matrix.instance }} ------"
             cat results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.log
             echo "---------------------------------------------------------------"
           done
 
-      - name: Upload all JMeter results
-        if: always()
+      # Upload results to GitHub artifacts
+      - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: jmeter-results-${{ needs.prepare.outputs.RUN_ID }}-instance${{ matrix.instance }}
           path: results/
           retention-days: ${{ github.event.inputs.retention_days }}
-
-# Job: cleanup old workflow runs
-  cleanup:
-    if: ${{ github.event.inputs.action == 'cleanup' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Delete workflow runs older than retention period
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const days = parseInt('${{ github.event.inputs.retention_days }}', 10);
-            const cutoff = new Date(Date.now() - days*24*60*60*1000);
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-
-            const runs = await github.paginate(
-              github.rest.actions.listWorkflowRunsForRepo,
-              { owner, repo, per_page: 100 }
-            );
-
-            let deleted = 0;
-            for (const run of runs) {
-              const created = new Date(run.created_at);
-              if (created < cutoff) {
-                await github.rest.actions.deleteWorkflowRun({ owner, repo, run_id: run.id });
-                deleted++;
-              }
-            }
-            core.info(`Deleted ${deleted} workflow runs older than ${days} days`)
