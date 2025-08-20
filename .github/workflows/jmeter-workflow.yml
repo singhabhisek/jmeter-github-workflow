@@ -24,10 +24,6 @@ on:
         description: "Comma-separated JMX scripts to run (default: all)"
         required: false
         default: "create-consumer,get-consumer,get-product,post-product,home-page"
-      previous_run_id:  # Optional previous run for dependent data
-        description: "Optional: specify runID for dependent data (like consumers)"
-        required: false
-        default: ""
       vm_count:  # Number of VMs to run in parallel
         description: "Number of VM instances to run in parallel"
         required: true
@@ -44,7 +40,7 @@ permissions:
 # Job: prepare run ID and matrix for VMs
 jobs:
   prepare:
-    runs-on: ubuntu-latest  # Prepare on Ubuntu VM
+    runs-on: ubuntu-latest
     outputs:
       RUN_ID: ${{ steps.setid.outputs.RUN_ID }}
       MATRIX_INSTANCES: ${{ steps.setmatrix.outputs.matrix }}
@@ -63,31 +59,29 @@ jobs:
       - name: Generate VM matrix
         id: setmatrix
         run: |
-          # Get VM count input
           COUNT=${{ github.event.inputs.vm_count }}
           if [ -z "$COUNT" ]; then COUNT=1; fi
-          # Build JSON array ["1","2","3",...]
           MATRIX=$(seq -s, 1 $COUNT | sed 's/,/","/g')
           MATRIX="[\"$MATRIX\"]"
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
 
 # Job: run JMeter tests
   run-tests:
-    if: ${{ github.event.inputs.action == 'run-tests' }}  # Only if action is run-tests
+    if: ${{ github.event.inputs.action == 'run-tests' }}
     needs: prepare
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        instance: ${{ fromJSON(needs.prepare.outputs.MATRIX_INSTANCES) }}  # Dynamic VM instances
-      fail-fast: false  # Do not cancel other matrix jobs if one fails
+        instance: ${{ fromJSON(needs.prepare.outputs.MATRIX_INSTANCES) }}
+      fail-fast: false
     steps:
-      - uses: actions/checkout@v4  # Checkout code
+      - uses: actions/checkout@v4
 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"  # Java version for JMeter
+          java-version: "17"
 
       - name: Install JMeter
         run: |
@@ -95,28 +89,41 @@ jobs:
           curl -L https://downloads.apache.org/jmeter/binaries/apache-jmeter-$JMETER_VERSION.tgz -o jmeter.tgz
           tar -xzf jmeter.tgz
           mv apache-jmeter-$JMETER_VERSION $HOME/jmeter
-          echo "$HOME/jmeter/bin" >> $GITHUB_PATH  # Add JMeter to PATH
+          echo "$HOME/jmeter/bin" >> $GITHUB_PATH
 
       - name: Prepare results folder
-        run: mkdir -p results  # Create folder for JTL/HTML reports/logs
+        run: mkdir -p results  # Store all JTL, logs, HTML reports here
 
-      - name: Download previous run data (optional)
-        if: ${{ github.event.inputs.previous_run_id != '' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: consumer-data-${{ github.event.inputs.previous_run_id }}
-          path: data/
+      # --- Validate that each script exists and its data folder is not empty ---
+      - name: Validate scripts and data
+        run: |
+          scripts="${{ github.event.inputs.scripts }}"
+          IFS=',' read -ra script_arr <<< "$scripts"
+          for script in "${script_arr[@]}"; do
+            # Check JMX script exists
+            JMX_PATH="tests/load/$script.jmx"  # <-- assumes structure: tests/<test_type>/<script>.jmx
+            if [ ! -f "$JMX_PATH" ]; then
+              echo "Error: JMX script $JMX_PATH does not exist!"
+              exit 1
+            fi
+
+            # Check if data folder exists and has files
+            DATA_FOLDER="tests/load/data/$script"  # <-- assumes structure: tests/<test_type>/data/<script>/
+            if [ ! -d "$DATA_FOLDER" ] || [ -z "$(ls -A $DATA_FOLDER)" ]; then
+              echo "Error: Data folder $DATA_FOLDER missing or empty!"
+              exit 1
+            fi
+          done
 
       - name: Run selected JMeter scripts
-        continue-on-error: false  # Stop if any script fails
+        continue-on-error: false
         run: |
           scripts="${{ github.event.inputs.scripts }}"
           IFS=',' read -ra script_arr <<< "$scripts"
           for script in "${script_arr[@]}"; do
             echo "Running JMeter script: $script.jmx on instance ${{ matrix.instance }}"
             
-            # Run JMeter in non-GUI mode, log to results/
-            jmeter -n -t tests/$script.jmx \
+            jmeter -n -t tests/load/$script.jmx \
                    -l results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.jtl \
                    -j results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.log \
                    -q env/${{ github.event.inputs.environment }}.properties
@@ -125,29 +132,18 @@ jobs:
             jmeter -g results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.jtl \
                    -o results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}-report
 
-            # Stream JMeter log to GitHub Actions console
             echo "------ JMeter log for $script instance ${{ matrix.instance }} ------"
             cat results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.log
             echo "---------------------------------------------------------------"
           done
 
       - name: Upload all JMeter results
-        if: always()  # Upload even if job fails or is cancelled
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: jmeter-results-${{ needs.prepare.outputs.RUN_ID }}-instance${{ matrix.instance }}
           path: results/
           retention-days: ${{ github.event.inputs.retention_days }}
-
-      - name: Upload consumer data if generated
-        if: always()
-        run: |
-          for f in results/*consumers*.csv; do
-            if [ -f "$f" ]; then
-              echo "Uploading $f"
-              gh upload-artifact --name consumer-data-${{ needs.prepare.outputs.RUN_ID }} --path "$f"
-            fi
-          done
 
 # Job: cleanup old workflow runs
   cleanup:
