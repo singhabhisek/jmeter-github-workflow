@@ -44,7 +44,7 @@ permissions:
 # Job: prepare run ID and matrix for VMs
 jobs:
   prepare:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # Prepare on Ubuntu VM
     outputs:
       RUN_ID: ${{ steps.setid.outputs.RUN_ID }}
       MATRIX_INSTANCES: ${{ steps.setmatrix.outputs.matrix }}
@@ -73,13 +73,13 @@ jobs:
 
 # Job: run JMeter tests
   run-tests:
-    if: ${{ github.event.inputs.action == 'run-tests' }}
+    if: ${{ github.event.inputs.action == 'run-tests' }}  # Only if action is run-tests
     needs: prepare
     runs-on: ubuntu-latest
     strategy:
       matrix:
         instance: ${{ fromJSON(needs.prepare.outputs.MATRIX_INSTANCES) }}  # Dynamic VM instances
-      fail-fast: false
+      fail-fast: false  # Do not cancel other matrix jobs if one fails
     steps:
       - uses: actions/checkout@v4  # Checkout code
 
@@ -87,7 +87,7 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "17"  # Java version for JMeter
 
       - name: Install JMeter
         run: |
@@ -95,10 +95,10 @@ jobs:
           curl -L https://downloads.apache.org/jmeter/binaries/apache-jmeter-$JMETER_VERSION.tgz -o jmeter.tgz
           tar -xzf jmeter.tgz
           mv apache-jmeter-$JMETER_VERSION $HOME/jmeter
-          echo "$HOME/jmeter/bin" >> $GITHUB_PATH
+          echo "$HOME/jmeter/bin" >> $GITHUB_PATH  # Add JMeter to PATH
 
       - name: Prepare results folder
-        run: mkdir -p results
+        run: mkdir -p results  # Create folder for JTL/HTML reports/logs
 
       - name: Download previous run data (optional)
         if: ${{ github.event.inputs.previous_run_id != '' }}
@@ -108,34 +108,35 @@ jobs:
           path: data/
 
       - name: Run selected JMeter scripts
-        continue-on-error: true  # Continue even if all requests fail
+        continue-on-error: false  # Stop if any script fails
         run: |
           scripts="${{ github.event.inputs.scripts }}"
           IFS=',' read -ra script_arr <<< "$scripts"
           for script in "${script_arr[@]}"; do
             echo "Running JMeter script: $script.jmx on instance ${{ matrix.instance }}"
-            # Generate JTL results and log files even on failure
+            
+            # Run JMeter in non-GUI mode, log to results/
             jmeter -n -t tests/$script.jmx \
                    -l results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.jtl \
                    -j results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.log \
                    -q env/${{ github.event.inputs.environment }}.properties
 
-            # Generate HTML report (safe even if test fails)
-            if [ -f results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.jtl ]; then
-              jmeter -g results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.jtl \
-                     -o results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}-report
-            fi
+            # Generate HTML report
+            jmeter -g results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.jtl \
+                   -o results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}-report
+
+            # Stream JMeter log to GitHub Actions console
+            echo "------ JMeter log for $script instance ${{ matrix.instance }} ------"
+            cat results/${{ needs.prepare.outputs.RUN_ID }}-$script-instance${{ matrix.instance }}.log
+            echo "---------------------------------------------------------------"
           done
 
       - name: Upload all JMeter results
-        if: always()  # Always upload even if tests fail
+        if: always()  # Upload even if job fails or is cancelled
         uses: actions/upload-artifact@v4
         with:
           name: jmeter-results-${{ needs.prepare.outputs.RUN_ID }}-instance${{ matrix.instance }}
-          path: |
-            results/
-            tests/
-            env/
+          path: results/
           retention-days: ${{ github.event.inputs.retention_days }}
 
       - name: Upload consumer data if generated
