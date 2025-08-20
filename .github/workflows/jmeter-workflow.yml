@@ -1,116 +1,120 @@
-name: JMeter Consumer Workflow  # Workflow name
+name: JMeter Consumer Workflow  # Main name of the workflow
 
-# Trigger workflow manually with inputs
+# -------------------- TRIGGER SECTION --------------------
+# This workflow can be triggered manually from GitHub Actions UI
 on:
   workflow_dispatch:
     inputs:
-      action:  # Run tests or cleanup
+      action:  # Defines what action this workflow should perform
         description: "Choose action"
         required: true
         default: run-tests
         type: choice
-        options: [run-tests, cleanup]
+        options: [run-tests, cleanup]  # Either run JMeter tests or cleanup old results
 
-      run_id:  # Optional run ID; default: timestamp
+      run_id:  # Optional identifier for a test run
         description: "Optional Run ID (leave blank for auto yyyymmdd-HHMMSS)"
         required: false
-        default: ""
+        default: ""  # If blank, a timestamp will be used
 
-      environment:  # Target environment for tests
+      environment:  # Target environment for JMeter test configuration
         description: "Environment for JMeter tests"
         required: true
         default: dev
         type: choice
-        options: [dev, staging, prod]
+        options: [dev, staging, prod]  # Corresponds to env/*.properties files
 
-      test_type:  # Test type dropdown
+      test_type:  # Dropdown for test category
         description: "Type of test to run"
         required: true
         default: load
         type: choice
-        options: [load, stress, endurance]
+        options: [load, stress, endurance]  # Each test type has its own folder under tests/
 
-      scripts:  # Comma-separated list of JMX scripts to run
+      scripts:  # List of JMX test scripts (comma-separated)
         description: "Comma-separated JMX scripts to run (default: all)"
         required: false
         default: "create-consumer,get-consumer,get-product,post-product,home-page"
 
-      vm_count:  # Number of parallel VM instances
+      vm_count:  # Number of parallel runners for distributed test execution
         description: "Number of VM instances to run in parallel"
         required: true
         default: 1
 
-      retention_days:  # Retention period for artifacts/runs
+      retention_days:  # Retention period to keep artifacts/results
         description: "Retention period (days) for old runs/artifacts"
         required: true
         default: "7"
 
+# Permissions required by workflow (artifact upload, cleanup, etc.)
 permissions:
   contents: write
   actions: write
 
-# --- Prepare job: generate run ID and VM matrix ---
+# -------------------- JOB 1: PREPARE --------------------
 jobs:
   prepare:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # GitHub-hosted Ubuntu runner
     outputs:
-      RUN_ID: ${{ steps.setid.outputs.RUN_ID }}
-      MATRIX_INSTANCES: ${{ steps.setmatrix.outputs.matrix }}
+      RUN_ID: ${{ steps.setid.outputs.RUN_ID }}  # Output run ID for later jobs
+      MATRIX_INSTANCES: ${{ steps.setmatrix.outputs.matrix }}  # Matrix for VM parallelism
     steps:
-      # Generate run ID: use user input or timestamp
+      # Step 1: Generate run ID (use timestamp if user did not provide one)
       - name: Generate runID
         id: setid
         run: |
           if [ -z "${{ github.event.inputs.run_id }}" ]; then
-            runid=$(date +%Y%m%d-%H%M%S)
+            runid=$(date +%Y%m%d-%H%M%S)   # Auto-generate run ID
           else
-            runid="${{ github.event.inputs.run_id }}"
+            runid="${{ github.event.inputs.run_id }}"  # Use user input
           fi
           echo "RUN_ID=$runid" >> $GITHUB_OUTPUT
 
-      # Generate matrix for VM instances
+      # Step 2: Build VM matrix for parallel execution
       - name: Generate VM matrix
         id: setmatrix
         run: |
           COUNT=${{ github.event.inputs.vm_count }}
-          if [ -z "$COUNT" ]; then COUNT=1; fi
+          if [ -z "$COUNT" ]; then COUNT=1; fi  # Default to 1 VM
           MATRIX=$(seq -s, 1 $COUNT | sed 's/,/","/g')
-          MATRIX="[\"$MATRIX\"]"
+          MATRIX="[\"$MATRIX\"]"  # Convert to JSON array for GitHub matrix
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
 
-# --- Run JMeter tests job ---
+# -------------------- JOB 2: RUN JMETER TESTS --------------------
   run-tests:
-    if: ${{ github.event.inputs.action == 'run-tests' }}
-    needs: prepare
+    if: ${{ github.event.inputs.action == 'run-tests' }}  # Only run if action = run-tests
+    needs: prepare  # Depends on prepare job outputs
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        instance: ${{ fromJSON(needs.prepare.outputs.MATRIX_INSTANCES) }}
-      fail-fast: false
+        instance: ${{ fromJSON(needs.prepare.outputs.MATRIX_INSTANCES) }}  # VM instances
+      fail-fast: false  # Do not stop other jobs if one fails
     steps:
-      - uses: actions/checkout@v4  # Checkout repository
+      # Step 1: Checkout repository (fetch test scripts, configs, etc.)
+      - uses: actions/checkout@v4
 
+      # Step 2: Setup Java (JMeter requires Java)
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
-          java-version: "17"
+          distribution: temurin  # OpenJDK Temurin build
+          java-version: "17"     # Java version
 
-      # --- Validate folders and scripts before downloading JMeter ---
+      # Step 3: Validate folder structure & script existence BEFORE downloading JMeter
       - name: Validate folder structure and scripts
         run: |
           TEST_TYPE="${{ github.event.inputs.test_type }}"
           SCRIPTS="${{ github.event.inputs.scripts }}"
           IFS=',' read -ra SCRIPT_ARR <<< "$SCRIPTS"
 
-          # Check test type folder exists
+          # Ensure test folder exists and is not empty
           TEST_FOLDER="tests/$TEST_TYPE"
           if [ ! -d "$TEST_FOLDER" ] || [ -z "$(ls -A $TEST_FOLDER)" ]; then
             echo "Error: Test folder $TEST_FOLDER missing or empty!"
             exit 1
           fi
 
-          # Check each JMX and data folder
+          # Ensure each JMX + data folder exists and is not empty
           for script in "${SCRIPT_ARR[@]}"; do
             JMX_PATH="$TEST_FOLDER/$script.jmx"
             DATA_FOLDER="$TEST_FOLDER/data/$script"
@@ -124,43 +128,43 @@ jobs:
             fi
           done
 
-      # --- Install JMeter and plugins ---
+      # Step 4: Install JMeter binary
       - name: Install JMeter
         run: |
           JMETER_VERSION=5.6.3
-          # Download JMeter binary
           curl -L https://downloads.apache.org/jmeter/binaries/apache-jmeter-$JMETER_VERSION.tgz -o jmeter.tgz
           tar -xzf jmeter.tgz
           mv apache-jmeter-$JMETER_VERSION $HOME/jmeter
-          echo "$HOME/jmeter/bin" >> $GITHUB_PATH
+          echo "$HOME/jmeter/bin" >> $GITHUB_PATH  # Add JMeter to PATH
 
+      # Step 5: Install JMeter Plugins (Dummy Sampler + Ultimate Thread Group)
       - name: Install JMeter Plugins
         run: |
           mkdir -p $HOME/jmeter/lib/ext
-          
+
           # Define plugin URLs
           DUMMY_PLUGIN_URL="https://jmeter-plugins.org/files/packages/jpgc-dummy-0.4.zip"
           ULTIMATE_PLUGIN_URL="https://jmeter-plugins.org/files/packages/jpgc-casutg-3.1.1.zip"
 
-          # Dummy Sampler Plugin (download ZIP and extract JARs)
-          curl -L -o /tmp/jpgc-dummy-0.4.zip $DUMMY_PLUGIN_URL
-          unzip -o /tmp/jpgc-dummy-0.4.zip -d /tmp/dummy-plugin
+          # Dummy Sampler Plugin
+          curl -L -o /tmp/jpgc-dummy.zip $DUMMY_PLUGIN_URL
+          unzip -o /tmp/jpgc-dummy.zip -d /tmp/dummy-plugin
           find /tmp/dummy-plugin -name "*.jar" -exec cp {} $HOME/jmeter/lib/ext/ \;
-          
-          # Ultimate Thread Group Plugin (download ZIP and extract JARs)
-          curl -L -o /tmp/jpgc-ultimate-thread-group-3.0.zip $ULTIMATE_PLUGIN_URL
-          unzip -o /tmp/jpgc-ultimate-thread-group-3.0.zip -d /tmp/ultimate-plugin
+
+          # Ultimate Thread Group Plugin
+          curl -L -o /tmp/jpgc-ultimate.zip $ULTIMATE_PLUGIN_URL
+          unzip -o /tmp/jpgc-ultimate.zip -d /tmp/ultimate-plugin
           find /tmp/ultimate-plugin -name "*.jar" -exec cp {} $HOME/jmeter/lib/ext/ \;
 
           echo "✅ Plugins installed"
 
-      # --- Prepare results folder per run ---
+      # Step 6: Prepare results folder for this run
       - name: Prepare results folder
         run: |
           RUN_ID=${{ needs.prepare.outputs.RUN_ID }}
-          mkdir -p results/$RUN_ID  # All logs, JTL, and HTML reports go here
+          mkdir -p results/$RUN_ID
 
-      # --- Run JMeter scripts ---
+      # Step 7: Run JMeter tests (one script at a time per instance)
       - name: Run JMeter scripts
         continue-on-error: false
         run: |
@@ -176,7 +180,7 @@ jobs:
             TEST_FOLDER="tests/$TEST_TYPE"
             RESULTS_FOLDER="results/$RUN_ID"
 
-            # Run JMeter non-GUI
+            # Run JMeter in non-GUI mode
             jmeter -n -t "$TEST_FOLDER/$script.jmx" \
                    -l "$RESULTS_FOLDER/$script-instance$INSTANCE.jtl" \
                    -j "$RESULTS_FOLDER/$script-instance$INSTANCE.log" \
@@ -186,13 +190,45 @@ jobs:
             jmeter -g "$RESULTS_FOLDER/$script-instance$INSTANCE.jtl" \
                    -o "$RESULTS_FOLDER/$script-instance$INSTANCE-report"
 
-            # Output logs to console
+            # Print logs for visibility
             echo "------ JMeter log for $script instance $INSTANCE ------"
             cat "$RESULTS_FOLDER/$script-instance$INSTANCE.log"
             echo "------------------------------------------------------"
           done
 
-      # --- Upload results as artifacts ---
+      # Step 8: Package scripts + configs + data + HTML reports into ZIP
+      - name: Package test artifacts
+        run: |
+          RUN_ID=${{ needs.prepare.outputs.RUN_ID }}
+          TEST_TYPE="${{ github.event.inputs.test_type }}"
+          ZIP_NAME="results/${RUN_ID}/jmeter-package-instance${{ matrix.instance }}.zip"
+
+          # Create staging folder for packaging
+          STAGE="results/${RUN_ID}/package-instance${{ matrix.instance }}"
+          mkdir -p "$STAGE"
+
+          # Copy JMX and associated data
+          SCRIPTS="${{ github.event.inputs.scripts }}"
+          IFS=',' read -ra SCRIPT_ARR <<< "$SCRIPTS"
+          for script in "${SCRIPT_ARR[@]}"; do
+            cp "tests/$TEST_TYPE/$script.jmx" "$STAGE/"
+            cp -r "tests/$TEST_TYPE/data/$script" "$STAGE/"
+          done
+
+          # Copy environment configs
+          cp -r env "$STAGE/"
+
+          # Copy HTML reports
+          cp -r results/$RUN_ID/*-report "$STAGE/"
+
+          # Create ZIP file
+          cd results/$RUN_ID
+          zip -r "jmeter-package-instance${{ matrix.instance }}.zip" "package-instance${{ matrix.instance }}"
+          cd -
+
+          echo "📦 Created package: $ZIP_NAME"
+
+      # Step 9: Upload results as GitHub Artifacts
       - name: Upload JMeter results
         if: always()
         uses: actions/upload-artifact@v4
@@ -201,11 +237,12 @@ jobs:
           path: results/${{ needs.prepare.outputs.RUN_ID }}/
           retention-days: ${{ github.event.inputs.retention_days }}
 
-# --- Cleanup old workflow runs and folders ---
+# -------------------- JOB 3: CLEANUP --------------------
   cleanup:
-    if: ${{ github.event.inputs.action == 'cleanup' }}
+    if: ${{ github.event.inputs.action == 'cleanup' }}  # Only run if action = cleanup
     runs-on: ubuntu-latest
     steps:
+      # Step 1: Delete workflow runs older than retention period
       - name: Delete workflow runs older than retention period
         uses: actions/github-script@v7
         with:
@@ -214,12 +251,10 @@ jobs:
             const cutoff = new Date(Date.now() - days*24*60*60*1000);
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-
             const runs = await github.paginate(
               github.rest.actions.listWorkflowRunsForRepo,
               { owner, repo, per_page: 100 }
             );
-
             let deleted = 0;
             for (const run of runs) {
               const created = new Date(run.created_at);
@@ -230,12 +265,12 @@ jobs:
             }
             core.info(`Deleted ${deleted} workflow runs older than ${days} days`)
 
+      # Step 2: Delete old results folders from repository workspace
       - name: Delete old result folders
         run: |
           RETENTION_DAYS=${{ github.event.inputs.retention_days }}
           for folder in results/*; do
             if [ -d "$folder" ]; then
-              # Compare folder timestamp with retention
               FOLDER_DATE=$(basename "$folder" | cut -d'-' -f1)
               CURRENT_DATE=$(date +%Y%m%d)
               DIFF=$((CURRENT_DATE - FOLDER_DATE))
