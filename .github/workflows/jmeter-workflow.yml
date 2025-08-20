@@ -186,6 +186,7 @@ jobs:
             # Generate HTML report (skip if failed)
             jmeter -g "$RESULTS_FOLDER/$script-instance$INSTANCE.jtl" \
                    -o "$RESULTS_FOLDER/$script-instance$INSTANCE-report" || echo "HTML report skipped"
+          done
 
       # Step: Upload results (always, even if run cancelled)
       - name: Upload JMeter results
