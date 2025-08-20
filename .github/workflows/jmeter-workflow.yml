@@ -140,7 +140,7 @@ jobs:
           
           # Define plugin URLs
           DUMMY_PLUGIN_URL="https://jmeter-plugins.org/files/packages/jpgc-dummy-0.4.zip"
-          ULTIMATE_PLUGIN_URL="https://jmeter-plugins.org/files/packages/jpgc-ultimate-thread-group-3.0.zip"
+          ULTIMATE_PLUGIN_URL="https://jmeter-plugins.org/files/packages/jpgc-casutg-3.1.1.zip"
 
           # Dummy Sampler Plugin (download ZIP and extract JARs)
           curl -L -o /tmp/jpgc-dummy-0.4.zip $DUMMY_PLUGIN_URL
