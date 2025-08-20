@@ -32,7 +32,7 @@
           <stringProp name="script">log.info(&quot;&gt;&gt;&gt; base.url: &quot; + props.get(&quot;base.url&quot;))
 log.info(&quot;&gt;&gt;&gt; api.port: &quot; + props.get(&quot;api.port&quot;))
 log.info(&quot;&gt;&gt;&gt; protocol: &quot; + props.get(&quot;protocol&quot;))
-log.info(&quot;&gt;&gt;&gt; full path: http://&quot; + props.get(&quot;base.url&quot;) + &quot;:&quot; + props.get(&quot;api.port&quot;) + &quot;/api/product&quot;)
+log.info(&quot;&gt;&gt;&gt; full path: http://&quot; + props.get(&quot;base.url&quot;) + &quot;:&quot; + props.get(&quot;api.port&quot;) + &quot;&quot;)
   </stringProp>
           <stringProp name="scriptLanguage">groovy</stringProp>
         </JSR223Sampler>
@@ -41,8 +41,8 @@ log.info(&quot;&gt;&gt;&gt; full path: http://&quot; + props.get(&quot;base.url&
           <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" enabled="true">
             <collectionProp name="Arguments.arguments"/>
           </elementProp>
-          <stringProp name="HTTPSampler.domain">74.225.249.186</stringProp>
-          <stringProp name="HTTPSampler.port">5000</stringProp>
+          <stringProp name="HTTPSampler.domain">${__groovy(props.get("base.url"))}</stringProp>
+          <stringProp name="HTTPSampler.port">${__groovy(props.get("api.port"))}</stringProp>
           <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.contentEncoding"></stringProp>
           <stringProp name="HTTPSampler.path">/</stringProp>
@@ -57,7 +57,7 @@ log.info(&quot;&gt;&gt;&gt; full path: http://&quot; + props.get(&quot;base.url&
         </HTTPSamplerProxy>
         <hashTree/>
       </hashTree>
-      <ResultCollector guiclass="ViewResultsFullVisualizer" testclass="ResultCollector" testname="View Results Tree" enabled="true">
+      <ResultCollector guiclass="ViewResultsFullVisualizer" testclass="ResultCollector" testname="View Results Tree" enabled="false">
         <boolProp name="ResultCollector.error_logging">false</boolProp>
         <objProp>
           <name>saveConfig</name>
