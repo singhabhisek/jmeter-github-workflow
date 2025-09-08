@@ -7,7 +7,7 @@ name: JMeter Consumer Workflow
 
 # 👇 Self-describing run name (shows in GitHub UI runs list)
 run-name: >
-  ${{ github.event.inputs.run_id != '' && github.event.inputs.run_id
+  JMeter Workflow: ${{ github.event.inputs.run_id != '' && github.event.inputs.run_id
       || format('JMeter Run - Env: {0} - Type: {1} - VMs: {2}',
                 github.event.inputs.environment,
                 github.event.inputs.test_type,
