@@ -1,123 +1,134 @@
 # ==============================================
-# JMeter Test Workflow
-# Enhanced with dynamic run-name, job names, and run summary
+# JMeter Test Workflow (Fully Annotated)
+# Features:
+#  - Matrix runners for parallel load
+#  - Per-instance artifacts
+#  - Optional aggregation into merged JTL + HTML
+#  - Cleanup old runs and results
+#  - Dynamic run names and clear purpose logging
 # ==============================================
 
-name: JMeter Consumer Workflow
+# -------- Workflow Name (static across repo) --------
+name: JMeter Consumer Workflow   # This is the static workflow name shown in GitHub Actions UI
 
-# 👇 Self-describing run name (shows in GitHub UI runs list)
-run-name: >
+# -------- Run Name (dynamic per execution) --------
+run-name: >                     # Run name shown under each run in GitHub Actions UI
   JMeter Workflow: ${{ github.event.inputs.run_id != '' && github.event.inputs.run_id
       || format('JMeter Run - Env: {0} - Type: {1} - VMs: {2}',
                 github.event.inputs.environment,
                 github.event.inputs.test_type,
                 github.event.inputs.vm_count) }}
 
+# -------- Workflow Triggers --------
 on:
-  workflow_dispatch:
-    inputs:
-      action:
-        description: "Choose action"
-        required: true
-        default: run-tests
+  workflow_dispatch:            # Trigger manually from GitHub Actions UI
+    inputs:                     # User inputs when manually dispatching
+      action:                   # Action type selector
+        description: "Choose action (run-tests or cleanup)"
+        required: true          # Mandatory field
+        default: run-tests       # Default action
         type: choice
-        options: [run-tests, cleanup]
+        options: [run-tests, cleanup]   # Allowed options
 
-      run_id:  # Doubles as Purpose/Label if provided
+      run_id:                   # Purpose/label of the run
         description: "Optional Run ID or Purpose (leave blank for auto)"
         required: false
         default: ""
 
-      environment:
+      environment:              # Target environment for JMeter
         description: "Environment for JMeter tests"
         required: true
         default: dev
         type: choice
         options: [dev, staging, prod]
 
-      test_type:
+      test_type:                # Kind of test being run
         description: "Type of test to run"
         required: true
         default: load
         type: choice
         options: [load, stress, endurance]
 
-      scripts:
+      scripts:                  # JMX test scripts list
         description: "Comma-separated JMX scripts (default: all)"
         required: false
         default: "create-consumer,get-consumer,get-product,post-product,home-page"
 
-      vm_count:
+      vm_count:                 # Number of parallel instances to run
         description: "Number of VM instances (matrix size)"
         required: true
         default: 1
 
-      retention_days:
+      retention_days:           # Retention for artifacts & cleanup
         description: "Retention period (days) for artifacts & cleanup"
         required: true
         default: "7"
 
-      include_extra:
+      include_extra:            # Include extra folders if needed
         description: "Include extra folders (Y/N)"
         required: false
         default: "N"
 
+      aggregate:                # New input to control aggregation job
+        description: "Aggregate results into single JTL/HTML (Y/N)"
+        required: false
+        default: "Y"
+
+# -------- Permissions (needed for artifact & cleanup) --------
 permissions:
-  contents: write
-  actions: write
+  contents: write   # Required to delete workflow runs and manage repo contents
+  actions: write    # Required to delete workflow runs
 
-# ------------------------------
-# Prepare job: generate run ID and VM matrix
-# ------------------------------
+# -------- Jobs Section --------
 jobs:
+
+  # -------- Job 1: Prepare job --------
   prepare:
-    runs-on: ubuntu-latest
-    outputs:
-      RUN_ID: ${{ steps.setid.outputs.RUN_ID }}
-      MATRIX_INSTANCES: ${{ steps.setmatrix.outputs.matrix }}
+    runs-on: ubuntu-latest               # Runs on latest Ubuntu runner
+    outputs:                             # Define job outputs for downstream jobs
+      RUN_ID: ${{ steps.setid.outputs.RUN_ID }}            # Exported run ID
+      MATRIX_INSTANCES: ${{ steps.setmatrix.outputs.matrix }} # Exported matrix values
     steps:
-      - name: Generate runID
-        id: setid
+      - name: Generate runID             # Step to generate run ID or use provided
+        id: setid                        # Step ID for reference
         run: |
-          if [ -z "${{ github.event.inputs.run_id }}" ]; then
-            runid=$(date +%Y%m%d-%H%M%S)
+          if [ -z "${{ github.event.inputs.run_id }}" ]; then   # If no run_id provided
+            runid=$(date +%Y%m%d-%H%M%S)                      # Auto-generate run ID using timestamp
           else
-            runid="${{ github.event.inputs.run_id }}"
+            runid="${{ github.event.inputs.run_id }}"         # Else use provided run_id
           fi
-          echo "RUN_ID=$runid" >> $GITHUB_OUTPUT
+          echo "RUN_ID=$runid" >> $GITHUB_OUTPUT              # Set output variable
 
-      - name: Generate VM matrix
-        id: setmatrix
+      - name: Generate VM matrix         # Step to generate matrix instances
+        id: setmatrix                    # Step ID for reference
         run: |
-          COUNT=${{ github.event.inputs.vm_count }}
-          if [ -z "$COUNT" ]; then COUNT=1; fi
-          MATRIX=$(seq -s, 1 $COUNT | sed 's/,/","/g')
-          MATRIX="[\"$MATRIX\"]"
-          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          COUNT=${{ github.event.inputs.vm_count }}           # Get VM count from input
+          if [ -z "$COUNT" ]; then COUNT=1; fi               # Default to 1 if blank
+          MATRIX=$(seq -s, 1 $COUNT | sed 's/,/","/g')      # Generate array string ["1","2",...]
+          MATRIX="[\"$MATRIX\"]"                             # Wrap into JSON array
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT            # Set output variable
 
-# ------------------------------
-# Run JMeter tests
-# ------------------------------
+  # -------- Job 2: Run JMeter tests (matrix) --------
   run-tests:
-    name: Run JMeter (Instance ${{ matrix.instance }})  # 👈 clear job name
-    if: ${{ github.event.inputs.action == 'run-tests' }}
-    needs: prepare
-    runs-on: ubuntu-latest
+    name: Run JMeter (Instance ${{ matrix.instance }})   # Job name shown in UI per instance
+    if: ${{ github.event.inputs.action == 'run-tests' }} # Only run if action is run-tests
+    needs: prepare                                       # Depends on prepare job
+    runs-on: ubuntu-latest                               # Each instance runs on Ubuntu
     strategy:
       matrix:
-        instance: ${{ fromJSON(needs.prepare.outputs.MATRIX_INSTANCES) }}
-      fail-fast: false
+        instance: ${{ fromJSON(needs.prepare.outputs.MATRIX_INSTANCES) }}  # Use dynamic matrix
+      fail-fast: false                                   # Don't stop all on failure
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4                       # Checkout repo code
 
-      - name: Setup Java
+      - name: Setup Java                                 # JMeter requires Java
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
-          java-version: "17"
+          distribution: temurin                          # Use Temurin distribution
+          java-version: "17"                            # Java 17 version
 
-      - name: Print Run Summary
+      - name: Print Run Summary                          # Step to show run summary
         run: |
           echo "===================================================="
           echo " GitHub Actions Run Summary "
@@ -131,9 +142,9 @@ jobs:
           echo " Run URL   : https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           echo "===================================================="
 
-      - name: Print System Info
+      - name: Print System Info                          # Debug info about runner
         run: |
-          PRINT_DEBUG="true" # 👈 set to false to skip
+          PRINT_DEBUG="true"                             # Toggle to disable system info
           if [ "$PRINT_DEBUG" = "true" ]; then
             echo "===== Runner System Info ====="
             echo "Public IP:"; curl -s ifconfig.me || true; echo
@@ -142,19 +153,19 @@ jobs:
             echo "Memory Info:"; free -h
           fi
 
-      - name: Validate folder structure and scripts
+      - name: Validate folder structure and scripts       # Ensure test scripts and data exist
         run: |
           TEST_TYPE="${{ github.event.inputs.test_type }}"
           SCRIPTS="${{ github.event.inputs.scripts }}"
-          IFS=',' read -ra SCRIPT_ARR <<< "$SCRIPTS"
-          TEST_FOLDER="tests/$TEST_TYPE"
+          IFS=',' read -ra SCRIPT_ARR <<< "$SCRIPTS"       # Split CSV into array
+          TEST_FOLDER="tests/$TEST_TYPE"                  # Test folder path
           if [ ! -d "$TEST_FOLDER" ] || [ -z "$(ls -A $TEST_FOLDER)" ]; then
             echo "Error: Test folder $TEST_FOLDER missing or empty!"
             exit 1
           fi
           for script in "${SCRIPT_ARR[@]}"; do
-            JMX_PATH="$TEST_FOLDER/$script.jmx"
-            DATA_FOLDER="$TEST_FOLDER/data/$script"
+            JMX_PATH="$TEST_FOLDER/$script.jmx"           # Path to JMX script
+            DATA_FOLDER="$TEST_FOLDER/data/$script"       # Path to data folder
             if [ ! -f "$JMX_PATH" ]; then
               echo "Error: JMX file $JMX_PATH does not exist!"
               exit 1
@@ -164,7 +175,7 @@ jobs:
             fi
           done
 
-      - name: Install JMeter
+      - name: Install JMeter                              # Download and install JMeter
         run: |
           JMETER_VERSION=5.6.3
           curl -L https://downloads.apache.org/jmeter/binaries/apache-jmeter-$JMETER_VERSION.tgz -o jmeter.tgz
@@ -172,7 +183,7 @@ jobs:
           mv apache-jmeter-$JMETER_VERSION $HOME/jmeter
           echo "$HOME/jmeter/bin" >> $GITHUB_PATH
 
-      - name: Install JMeter Plugins
+      - name: Install JMeter Plugins                      # Download & install plugins
         run: |
           mkdir -p $HOME/jmeter/lib/ext
           curl -L -o /tmp/jpgc-dummy.zip https://jmeter-plugins.org/files/packages/jpgc-dummy-0.4.zip
@@ -182,10 +193,10 @@ jobs:
           unzip -o /tmp/jpgc-ultimate.zip -d /tmp/ultimate
           find /tmp/ultimate -name "*.jar" -exec cp {} $HOME/jmeter/lib/ext/ \;
 
-      - name: Prepare results folder
+      - name: Prepare results folder                      # Create results folder for artifacts
         run: mkdir -p results/${{ needs.prepare.outputs.RUN_ID }}
 
-      - name: Run JMeter scripts
+      - name: Run JMeter scripts                          # Execute JMeter scripts
         run: |
           TEST_TYPE="${{ github.event.inputs.test_type }}"
           ENV="${{ github.event.inputs.environment }}"
@@ -205,23 +216,68 @@ jobs:
                    -o "$RESULTS_FOLDER/$script-instance$INSTANCE-report" || echo "HTML report skipped"
           done
 
-      - name: Upload JMeter results
-        if: always()
+      - name: Upload JMeter results                       # Upload results as artifacts
+        if: always()                                      # Ensure upload even if job fails
         uses: actions/upload-artifact@v4
         with:
           name: jmeter-results-${{ needs.prepare.outputs.RUN_ID }}-instance${{ matrix.instance }}
           path: results/${{ needs.prepare.outputs.RUN_ID }}/
           retention-days: ${{ github.event.inputs.retention_days }}
 
-# ------------------------------
-# Cleanup job
-# ------------------------------
-  cleanup:
-    name: Cleanup Old Runs
-    if: ${{ github.event.inputs.action == 'cleanup' }}
+  # -------- Job 3: Aggregate results --------
+  aggregate-results:
+    name: Aggregate JMeter Results                        # Job name in UI
+    if: ${{ github.event.inputs.action == 'run-tests' && github.event.inputs.aggregate == 'Y' }} # Only if run-tests and aggregation enabled
+    needs: run-tests                                      # Depends on run-tests job
     runs-on: ubuntu-latest
     steps:
-      - name: Delete old workflow runs
+      - uses: actions/checkout@v4                        # Checkout code
+
+      - name: Setup Java (for JMeter report generation)   # Required for JMeter CLI
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Download matrix artifacts                   # Download all per-instance artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: merged-results
+
+      - name: Merge JTL files                             # Combine JTL files into single
+        run: |
+          mkdir -p final-results
+          echo "Merging JTL files from matrix runs..."
+          first_file=$(find merged-results -name "*.jtl" | head -n 1)
+          if [ -z "$first_file" ]; then
+            echo "❌ No JTL files found in artifacts!"
+            exit 1
+          fi
+          head -n 1 "$first_file" > final-results/merged.jtl   # Copy header from first file
+          find merged-results -name "*.jtl" | while read file; do
+            tail -n +2 "$file" >> final-results/merged.jtl     # Append rows skipping header
+          done
+          echo "✅ Merged JTL created at final-results/merged.jtl"
+
+      - name: Generate merged HTML report                 # Create aggregated HTML report
+        run: |
+          jmeter -g final-results/merged.jtl -o final-results/merged-report || echo "⚠️ Report generation skipped"
+
+      - name: Upload merged results                       # Upload aggregated results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jmeter-merged-results-${{ needs.prepare.outputs.RUN_ID }}
+          path: final-results/
+          retention-days: ${{ github.event.inputs.retention_days }}
+
+  # -------- Job 4: Cleanup job --------
+  cleanup:
+    name: Cleanup Old Runs                               # Job name shown in UI
+    if: ${{ github.event.inputs.action == 'cleanup' }}   # Only run if action=cleanup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old workflow runs                   # GitHub API to cleanup workflow runs
         uses: actions/github-script@v7
         with:
           script: |
@@ -243,7 +299,7 @@ jobs:
             }
             core.info(`Deleted ${deleted} workflow runs older than ${days} days`)
 
-      - name: Delete old result folders
+      - name: Delete old result folders                   # Cleanup results folder in repo
         run: |
           RETENTION_DAYS=${{ github.event.inputs.retention_days }}
           for folder in results/*; do
