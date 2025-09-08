@@ -240,6 +240,7 @@ jobs:
             jmeter -n -t "$TEST_FOLDER/$script.jmx" \
                    -l "$RESULTS_FOLDER/$script-instance$INSTANCE.jtl" \
                    -j "$RESULTS_FOLDER/$script-instance$INSTANCE.log" \
+                   -Duser.timezone=America/New_York \
                    -q "env/$ENV.properties"
             # Generate HTML report (skip if failed)
             jmeter -g "$RESULTS_FOLDER/$script-instance$INSTANCE.jtl" \
@@ -309,7 +310,7 @@ jobs:
       # Generate merged HTML report
       - name: Generate merged HTML report
         run: |
-          jmeter -g final-results/merged.jtl -o final-results/merged-report || echo "⚠️ Report generation skipped"
+          jmeter -g final-results/merged.jtl -o final-results/merged-report -Duser.timezone=America/New_York || echo "⚠️ Report generation skipped"
 
       # Upload merged artifacts
       - name: Upload merged results
